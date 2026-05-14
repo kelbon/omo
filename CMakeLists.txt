@@ -1,6 +1,7 @@
 cmake_minimum_required(VERSION 3.20)
 project(omo)
 
+option(omo_DOWNLOAD_BOOST "if true, OMO will download boost itself" ON)
 option(omo_ENABLE_TESTING "enables testing" OFF)
 option(omo_ENABLE_ASAN "build ASAN (for CI)" OFF)
 option(omo_ENABLE_UBSAN "build UBSAN (for CI)" OFF)
@@ -9,7 +10,7 @@ include(cmake/deps.cmake)
 
 add_library(omolib STATIC
     # add new .cpp files here. GLOB for libraries is bad practice  
-    src/common.cpp
+    src/stream_parser.cpp
 )
 
 target_include_directories(omolib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
@@ -19,6 +20,7 @@ target_link_libraries(omolib PUBLIC
     anyanylib
     kelcorolib
     zallib
+    Boost::json
 )
 
 set_target_properties(omolib PROPERTIES
