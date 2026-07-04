@@ -6,11 +6,12 @@
 
 #include <zal/zal.hpp>
 
+#include <boost/system/error_code.hpp>
+
 namespace omo {
 
 // принимает на вход токены и функцию для создания парсера
-// сделано совместимо с boost json: его парсер сам обрабатывает части чисел и при подаче последней части даёт
-// вызывает on_<то чего части это были ключа или просто строки>
+
 struct token_feeder {
  protected:
   using kind_e = sax_token::kind_e;
@@ -143,8 +144,8 @@ struct token_feeder {
   }
 };
 
-// auto& заменяет boost::system::error_code, так как эта библиотека не инклудит его, при этом реализация
-// игнорирует error_code
+// сделано совместимо с boost json: его парсер сам обрабатывает части чисел и при подаче последней части даёт
+// вызывает on_<то чего части это были ключа или просто строки>
 struct boostjson_token_feeder : token_feeder {
   static constexpr size_t max_array_size = -1;
   static constexpr size_t max_object_size = -1;
@@ -153,89 +154,89 @@ struct boostjson_token_feeder : token_feeder {
 
   using token_feeder::token_feeder;
 
-  bool on_document_begin(auto&) {
+  bool on_document_begin(boost::system::error_code&) {
     return true;
   }
 
-  bool on_document_end(auto&) {
+  bool on_document_end(boost::system::error_code&) {
     return true;
   }
 
-  bool on_array_begin(auto&) {
+  bool on_array_begin(boost::system::error_code&) {
     token_feeder::on_array_begin();
     return true;
   }
 
-  bool on_array_end(size_t, auto&) {
+  bool on_array_end(size_t, boost::system::error_code&) {
     token_feeder::on_array_end();
     return true;
   }
 
-  bool on_object_begin(auto&) {
+  bool on_object_begin(boost::system::error_code&) {
     token_feeder::on_object_begin();
     return true;
   }
 
-  bool on_object_end(size_t, auto&) {
+  bool on_object_end(size_t, boost::system::error_code&) {
     token_feeder::on_object_end();
     return true;
   }
 
-  bool on_string(std::string_view s, size_t, auto&) {
+  bool on_string(std::string_view s, size_t, boost::system::error_code&) {
     token_feeder::on_string(s);
     return true;
   }
 
-  bool on_key(std::string_view s, size_t, auto&) {
+  bool on_key(std::string_view s, size_t, boost::system::error_code&) {
     token_feeder::on_key(s);
     return true;
   }
 
-  bool on_int64(int64_t i, std::string_view, auto&) {
+  bool on_int64(int64_t i, std::string_view, boost::system::error_code&) {
     token_feeder::on_int64(i);
     return true;
   }
 
-  bool on_uint64(uint64_t u, std::string_view, auto&) {
+  bool on_uint64(uint64_t u, std::string_view, boost::system::error_code&) {
     token_feeder::on_uint64(u);
     return true;
   }
 
-  bool on_double(double d, std::string_view, auto&) {
+  bool on_double(double d, std::string_view, boost::system::error_code&) {
     token_feeder::on_double(d);
     return true;
   }
 
-  bool on_bool(bool b, auto&) {
+  bool on_bool(bool b, boost::system::error_code&) {
     token_feeder::on_bool(b);
     return true;
   }
 
-  bool on_null(auto&) {
+  bool on_null(boost::system::error_code&) {
     token_feeder::on_null();
     return true;
   }
 
-  bool on_string_part(std::string_view s, size_t, auto&) {
+  bool on_string_part(std::string_view s, size_t, boost::system::error_code&) {
     token_feeder::on_part(s);
     return true;
   }
 
-  bool on_comment_part(std::string_view, auto&) {
+  bool on_comment_part(std::string_view, boost::system::error_code&) {
     return true;
   }
 
-  bool on_key_part(std::string_view s, size_t, auto&) {
+  bool on_key_part(std::string_view s, size_t, boost::system::error_code&) {
     token_feeder::on_part(s);
     return true;
   }
 
-  bool on_number_part(std::string_view, auto&) {
+  bool on_number_part(std::string_view, boost::system::error_code&) {
     // boost сам обрабатывает части чисел, парсит их и затем вызывает on_int64 / on_double и тд
     return true;
   }
 
-  bool on_comment(std::string_view, auto&) {
+  bool on_comment(std::string_view, boost::system::error_code&) {
     return true;
   }
 };
