@@ -1,6 +1,22 @@
 #include "omo/stream_parser.hpp"
 #include <moko3/moko3.hpp>
 
+using omo::parse_error;
+using omo::sax_token;
+using omo::sax_token_value;
+using omo::stream_parser;
+using omo::stream_parser_tokens;
+using omo::tokens_consumer;
+
+static std::vector<sax_token_value> into_tokens(std::string_view json) {
+  std::vector<sax_token_value> tokens;
+  omo::stream_parser p([&](sax_token& tok, dd::with_stack_resource) {
+    return omo::sax_ignore_json_value(tok, [&tokens](sax_token& t) { tokens.emplace_back(t); });
+  });
+  p.feed(json, /*end=*/true);
+  return tokens;
+}
+
 struct TestObject {
   // неявное сравнение double должно работать корректно
   bool operator==(const TestObject&) const = default;
@@ -13,20 +29,15 @@ struct TestObject {
   std::optional<std::vector<std::optional<TestObject>>> nested_objects;
 };
 
-using omo::parse_error;
-using omo::sax_token;
-using omo::stream_parser;
-using omo::tokens_consumer;
-
 static tokens_consumer parse(int64_t& v, sax_token& tok, dd::with_stack_resource) {
   using enum sax_token::kind_e;
   tok.expect(tok.int64 | tok.uint64);
-  switch (tok.got) {
+  switch (tok.kind()) {
     case int64:
-      v = tok.int_m;
+      v = tok.get_int64();
       return {};
     case uint64:
-      v = tok.uint_m;
+      v = tok.get_uint64();
       return {};
     default:
       omo::unreachable();
@@ -36,15 +47,15 @@ static tokens_consumer parse(int64_t& v, sax_token& tok, dd::with_stack_resource
 static tokens_consumer parse(double& v, sax_token& tok, dd::with_stack_resource) {
   using enum sax_token::kind_e;
   tok.expect(tok.int64 | tok.uint64 | tok.double_);
-  switch (tok.got) {
+  switch (tok.kind()) {
     case int64:
-      v = tok.int_m;
+      v = tok.get_int64();
       return {};
     case uint64:
-      v = tok.uint_m;
+      v = tok.get_uint64();
       return {};
     case double_:
-      v = tok.double_m;
+      v = tok.get_double();
       return {};
     default:
       omo::unreachable();
@@ -53,13 +64,13 @@ static tokens_consumer parse(double& v, sax_token& tok, dd::with_stack_resource)
 
 static tokens_consumer parse(bool& v, sax_token& tok, dd::with_stack_resource) {
   tok.expect(tok.bool_);
-  v = tok.bool_m;
+  v = tok.get_bool();
   return {};
 }
 
 static tokens_consumer parse(std::string& v, sax_token& tok, dd::with_stack_resource) {
   tok.expect(tok.string);
-  v = tok.str_m;
+  v = tok.get_str();
   return {};
 }
 
@@ -68,7 +79,7 @@ static tokens_consumer parse(std::vector<T>& v, sax_token& tok, dd::with_stack_r
   tok.expect(sax_token::array_begin);
   for (;;) {
     co_yield {};
-    if (tok.got == sax_token::array_end)
+    if (tok.kind() == sax_token::array_end)
       break;
     co_yield dd::elements_of(parse(v.emplace_back(), tok, r));
   }
@@ -76,7 +87,7 @@ static tokens_consumer parse(std::vector<T>& v, sax_token& tok, dd::with_stack_r
 
 template <typename T>
 static tokens_consumer parse(std::optional<T>& v, sax_token& tok, dd::with_stack_resource r) {
-  if (tok.got == sax_token::null) [[unlikely]]
+  if (tok.kind() == sax_token::null) [[unlikely]]
     return {};
   return parse(v.emplace(T{}), tok, r);
 }
@@ -86,25 +97,25 @@ static tokens_consumer parse(TestObject& v, sax_token& tok, dd::with_stack_resou
 
   for (;;) {
     co_yield {};
-    if (tok.got == tok.object_end)
+    if (tok.kind() == tok.object_end)
       break;
     tok.expect(tok.key);
-    if (tok.str_m == "int_field") {
+    if (tok.get_key() == "int_field") {
       co_yield {};
       co_yield dd::elements_of(parse(v.int_field, tok, r));
-    } else if (tok.str_m == "double_field") {
+    } else if (tok.get_key() == "double_field") {
       co_yield {};
       co_yield dd::elements_of(parse(v.double_field, tok, r));
-    } else if (tok.str_m == "bool_field") {
+    } else if (tok.get_key() == "bool_field") {
       co_yield {};
       co_yield dd::elements_of(parse(v.bool_field, tok, r));
-    } else if (tok.str_m == "string_field") {
+    } else if (tok.get_key() == "string_field") {
       co_yield {};
       co_yield dd::elements_of(parse(v.string_field, tok, r));
-    } else if (tok.str_m == "array_field") {
+    } else if (tok.get_key() == "array_field") {
       co_yield {};
       co_yield dd::elements_of(parse(v.array_field, tok, r));
-    } else if (tok.str_m == "nested_objects") {
+    } else if (tok.get_key() == "nested_objects") {
       co_yield {};
       co_yield dd::elements_of(parse(v.nested_objects, tok, r));
     } else
@@ -112,12 +123,13 @@ static tokens_consumer parse(TestObject& v, sax_token& tok, dd::with_stack_resou
   }
 }
 
-static auto parser_maker(auto& obj) {
-  return [&obj](sax_token& tok, dd::with_stack_resource r) { return parse(obj, tok, r); };
-}
-
 static auto make_parser(auto& obj) {
   return stream_parser([&obj](sax_token& tok, dd::with_stack_resource r) { return parse(obj, tok, r); });
+}
+
+static auto make_tokens_parser(auto& obj) {
+  return stream_parser_tokens(
+      [&obj](sax_token& tok, dd::with_stack_resource r) { return parse(obj, tok, r); });
 }
 
 static void feed(stream_parser& p, std::string_view json, int mode) {
@@ -140,57 +152,75 @@ static void feed(stream_parser& p, std::string_view json, int mode) {
   }
 }
 
+static void feed(stream_parser_tokens& p, std::span<const sax_token_value> json, int mode) {
+  switch (mode) {
+    case 0:
+      p.feed(json, /*end=*/true);
+      break;
+    case 1:
+      while (!json.empty()) {
+        p.feed(std::span(json).subspan(0, 1), /*end=*/json.size() == 1);
+        json = json.subspan(1);
+      }
+      break;
+    case 2: {
+      auto mid = json.size() / 2;
+      p.feed(json.subspan(0, mid), /*end=*/false);
+      p.feed(json.subspan(mid), /*end=*/true);
+      break;
+    }
+  }
+}
+
+template <typename T>
+[[nodiscard]] static bool parse_twice(std::string_view json, const T& expected, int mode) {
+  {
+    T object;
+    stream_parser p1 = make_parser(object);
+    feed(p1, json, mode);
+    if (object != expected)
+      return false;
+  }
+  {
+    T object;
+    stream_parser_tokens p2 = make_tokens_parser(object);
+    std::vector tokens = into_tokens(json);
+    feed(p2, tokens, mode);
+    if (object != expected)
+      return false;
+  }
+  return true;
+}
+
 TEST("scalar fields") {
   int mode = GENERATE(0, 1, 2);
 
   SECTION("int positive") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"int_field":123})", mode);
-    REQUIRE(got == TestObject{.int_field = 123});
+    REQUIRE(parse_twice(R"({"int_field":123})", TestObject{.int_field = 123}, mode));
   }
 
   SECTION("int negative") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"int_field":-42})", mode);
-    REQUIRE(got == TestObject{.int_field = -42});
+    REQUIRE(parse_twice(R"({"int_field":-42})", TestObject{.int_field = -42}, mode));
   }
 
   SECTION("double fractional") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"double_field":21.12})", mode);
-    auto ex = TestObject{.double_field = 21.12};
-    REQUIRE(got == ex);
+    REQUIRE(parse_twice(R"({"double_field":21.12})", TestObject{.double_field = 21.12}, mode));
   }
 
   SECTION("double from integer") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"double_field":5})", mode);
-    REQUIRE(got == TestObject{.double_field = 5.0});
+    REQUIRE(parse_twice(R"({"double_field":5})", TestObject{.double_field = 5.0}, mode));
   }
 
   SECTION("bool true") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"bool_field":true})", mode);
-    REQUIRE(got == TestObject{.bool_field = true});
+    REQUIRE(parse_twice(R"({"bool_field":true})", TestObject{.bool_field = true}, mode));
   }
 
   SECTION("bool false") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"bool_field":false})", mode);
-    REQUIRE(got == TestObject{.bool_field = false});
+    REQUIRE(parse_twice(R"({"bool_field":false})", TestObject{.bool_field = false}, mode));
   }
 
   SECTION("string") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"string_field":"hello"})", mode);
-    REQUIRE(got == TestObject{.string_field = "hello"});
+    REQUIRE(parse_twice(R"({"string_field":"hello"})", TestObject{.string_field = "hello"}, mode));
   }
 }
 
@@ -198,17 +228,11 @@ TEST("optional null") {
   int mode = GENERATE(0, 1, 2);
 
   SECTION("double null") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"double_field":null})", mode);
-    REQUIRE(!got.double_field.has_value());
+    REQUIRE(parse_twice(R"({"double_field":null})", TestObject{}, mode));
   }
 
   SECTION("string null") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"string_field":null})", mode);
-    REQUIRE(!got.string_field.has_value());
+    REQUIRE(parse_twice(R"({"string_field":null})", TestObject{}, mode));
   }
 }
 
@@ -216,24 +240,16 @@ TEST("array field") {
   int mode = GENERATE(0, 1, 2);
 
   SECTION("non-empty") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"array_field":[1,2,3]})", mode);
-    REQUIRE(got == TestObject{.array_field = {std::vector<int64_t>{1, 2, 3}}});
+    REQUIRE(parse_twice(R"({"array_field":[1,2,3]})",
+                        TestObject{.array_field = {std::vector<int64_t>{1, 2, 3}}}, mode));
   }
 
   SECTION("empty") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"array_field":[]})", mode);
-    REQUIRE(got == TestObject{.array_field = {std::vector<int64_t>{}}});
+    REQUIRE(parse_twice(R"({"array_field":[]})", TestObject{.array_field = {std::vector<int64_t>{}}}, mode));
   }
 
   SECTION("null") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"array_field":null})", mode);
-    REQUIRE(!got.array_field.has_value());
+    REQUIRE(parse_twice(R"({"array_field":null})", TestObject{}, mode));
   }
 }
 
@@ -241,52 +257,105 @@ TEST("nested objects") {
   int mode = GENERATE(0, 1, 2);
 
   SECTION("single nested") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"nested_objects":[{"int_field":7}]})", mode);
     TestObject inner{.int_field = 7};
-    REQUIRE(got == TestObject{.nested_objects = {{{inner}}}});
+    REQUIRE(parse_twice(R"({"nested_objects":[{"int_field":7}]})", TestObject{.nested_objects = {{{inner}}}},
+                        mode));
   }
 
   SECTION("null element in array") {
-    TestObject got;
-    auto p = make_parser(got);
-    feed(p, R"({"nested_objects":[null,{"int_field":1}]})", mode);
     TestObject inner{.int_field = 1};
-    REQUIRE(got == TestObject{.nested_objects = {{{std::nullopt, inner}}}});
+    REQUIRE(parse_twice(R"({"nested_objects":[null,{"int_field":1}]})",
+                        TestObject{.nested_objects = {{{std::nullopt, inner}}}}, mode));
   }
 }
 
 TEST("all fields") {
   int mode = GENERATE(0, 1, 2);
 
-  TestObject got;
-  auto p = make_parser(got);
-  feed(p,
-       R"({"int_field":1,"double_field":2.5,"bool_field":true,)"
-       R"("string_field":"x","array_field":[10,20]})",
-       mode);
-
-  TestObject expected{
-      .int_field = 1,
-      .double_field = 2.5,
-      .bool_field = true,
-      .string_field = "x",
-      .array_field = {{10, 20}},
-  };
-  REQUIRE(got == expected);
+  REQUIRE(parse_twice(R"({"int_field":1,"double_field":2.5,"bool_field":true,)"
+                      R"("string_field":"x","array_field":[10,20]})",
+                      TestObject{
+                          .int_field = 1,
+                          .double_field = 2.5,
+                          .bool_field = true,
+                          .string_field = "x",
+                          .array_field = {{10, 20}},
+                      },
+                      mode));
 }
 
 TEST("parse errors") {
-  TestObject got;
-  auto p = make_parser(got);
-  try {
-    p.feed(R"({"unknown_key":1})", /*end=*/true);
-    FAIL("should not be reached");
-  } catch (parse_error&) {
-    // OK
+  SECTION("unknown key") {
+    TestObject got;
+    auto p = make_parser(got);
+    try {
+      p.feed(R"({"unknown_key":1})", /*end=*/true);
+      FAIL("should not be reached");
+    } catch (parse_error&) {
+      // OK
+    }
+  }
+
+  SECTION("wrong type for int field") {
+    TestObject got;
+    auto p = make_parser(got);
+    try {
+      p.feed(R"({"int_field":"oops"})", /*end=*/true);
+      FAIL("should not be reached");
+    } catch (parse_error&) {
+      // OK
+    }
+  }
+
+  SECTION("wrong type for bool field") {
+    TestObject got;
+    auto p = make_parser(got);
+    try {
+      p.feed(R"({"bool_field":1})", /*end=*/true);
+      FAIL("should not be reached");
+    } catch (parse_error&) {
+      // OK
+    }
+  }
+
+  SECTION("array expected but got object") {
+    TestObject got;
+    auto p = make_parser(got);
+    try {
+      p.feed(R"({"array_field":{}})", /*end=*/true);
+      FAIL("should not be reached");
+    } catch (parse_error&) {
+      // OK
+    }
+  }
+
+  SECTION("object expected but got array") {
+    TestObject got;
+    auto p = make_parser(got);
+    try {
+      p.feed(R"({"nested_objects":[[]]})", /*end=*/true);
+      FAIL("should not be reached");
+    } catch (parse_error&) {
+      // OK
+    }
   }
 }
 
+TEST("Ignore value") {
+  SECTION("single scalar") {
+    std::vector<omo::sax_token_value> tokens = into_tokens("1");
+    REQUIRE(tokens.size() == 1);
+  }
+
+  SECTION("empty array") {
+    std::vector<omo::sax_token_value> tokens = into_tokens("[]");
+    REQUIRE(tokens.size() == 2);  // array_begin + array_end
+  }
+
+  SECTION("nested structure is fully collected without crashing") {
+    std::vector<omo::sax_token_value> tokens = into_tokens(R"({"a":[1,2,{"b":null}],"c":"x"})");
+    REQUIRE(!tokens.empty());
+  }
+}
 REGISTER_TEST_LISTENER(moko3::gtest_listener);
 MOKO3_MAIN;

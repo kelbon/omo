@@ -38,6 +38,9 @@ struct sax_token {
     part = 1 << 11,
   };
 
+ private:
+  friend struct sax_token_value;
+
   union {
     double double_m;
     int64_t int_m;
@@ -48,6 +51,7 @@ struct sax_token {
 
   kind_e got = sax_token::object_begin;
 
+ public:
   sax_token() {
   }
   ~sax_token() {
@@ -57,9 +61,110 @@ struct sax_token {
     if (!(got & tokens))
       throw parse_error("unexpected token bits `{:b}`, expected bits: `{:b}`", uint16_t(got), tokens);
   }
+  [[nodiscard]] kind_e kind() const noexcept {
+    return got;
+  }
+
+  static bool is_string(sax_token::kind_e got) noexcept {
+    using enum sax_token::kind_e;
+    switch (got) {
+      case string:
+      case key:
+      case part:
+        return true;
+      case array_begin:
+      case array_end:
+      case object_begin:
+      case object_end:
+      case int64:
+      case uint64:
+      case double_:
+      case bool_:
+      case null:
+        return false;
+    }
+    unreachable();
+  }
+
+  const double& get_double() const noexcept {
+    assert(got == double_);
+    return double_m;
+  }
+  const int64_t& get_int64() const noexcept {
+    assert(got == int64);
+    return int_m;
+  }
+  const uint64_t& get_uint64() const noexcept {
+    assert(got == uint64);
+    return uint_m;
+  }
+  // любая строка, part/key/string
+  std::string_view get_str() const noexcept {
+    assert(is_string(got));
+    return str_m;
+  }
+  std::string_view get_key() const noexcept {
+    assert(got == key);
+    return str_m;
+  }
+  std::string_view get_part() const noexcept {
+    assert(got == part);
+    return str_m;
+  }
+  const bool& get_bool() const noexcept {
+    assert(got == bool_);
+    return bool_m;
+  }
+
+  void set_double(double d) noexcept {
+    got = double_;
+    double_m = d;
+  }
+  void set_int64(int64_t i) noexcept {
+    got = int64;
+    int_m = i;
+  }
+  void set_uint64(uint64_t u) noexcept {
+    got = uint64;
+    uint_m = u;
+  }
+  // pre: kind одно из key/part/string
+  void set_str(std::string_view str, kind_e kind) noexcept {
+    assert(kind == part || kind == key || kind == string);
+    got = kind;
+    str_m = str;
+  }
+  void set_part(std::string_view str) noexcept {
+    got = part;
+    str_m = str;
+  }
+  void set_key(std::string_view str) noexcept {
+    got = key;
+    str_m = str;
+  }
+  void set_bool(bool b) noexcept {
+    got = bool_;
+    bool_m = b;
+  }
+  void set_null() noexcept {
+    got = null;
+  }
+  void set_object_begin() noexcept {
+    got = object_begin;
+  }
+  void set_object_end() noexcept {
+    got = object_end;
+  }
+  void set_array_begin() noexcept {
+    got = array_begin;
+  }
+  void set_array_end() noexcept {
+    got = array_end;
+  }
 };
 
 struct sax_token_value {
+ private:
   union {
     double double_m;
     int64_t int_m;
@@ -67,6 +172,11 @@ struct sax_token_value {
     std::string str_m;
     bool bool_m;
   };
+  sax_token::kind_e got = sax_token::object_begin;
+
+ public:
+  sax_token_value() {
+  }
 
   sax_token_value(sax_token token) {
     using enum sax_token::kind_e;
@@ -98,10 +208,6 @@ struct sax_token_value {
     }
   }
 
-  sax_token_value() {
-  }
-  sax_token_value(const sax_token_value&) = delete;
-
   sax_token_value(sax_token_value&& rhs) noexcept {
     if (is_string(rhs.got)) {
       got = rhs.got;
@@ -116,6 +222,27 @@ struct sax_token_value {
     std::destroy_at(this);
     std::construct_at(this, std::move(rhs));
     return *this;
+  }
+
+  [[nodiscard]] sax_token::kind_e kind() const noexcept {
+    return got;
+  }
+
+  // позволяет вместо нескольких токенов part создать один с более длинной строкой
+  // pre: *this это part
+  void combine_parts(std::string_view str) {
+    assert(is_string(kind()));
+    str_m += str;
+  }
+
+  // позволяет заменить часть на полноценный токен складывая значение с 'str'
+  // например part("a") + part("b") + key("c") = key("abc")
+  // pre: k должен быть key/string
+  void replace_part(std::string_view str, sax_token::kind_e k) {
+    assert(k == sax_token::key || k == sax_token::string);
+    assert(kind() == sax_token::part);
+    str_m += str;
+    got = k;
   }
 
   sax_token to_view() const noexcept {
@@ -152,31 +279,12 @@ struct sax_token_value {
   }
 
   static bool is_string(sax_token::kind_e got) noexcept {
-    using enum sax_token::kind_e;
-    switch (got) {
-      case string:
-      case key:
-      case part:
-        return true;
-      case array_begin:
-      case array_end:
-      case object_begin:
-      case object_end:
-      case int64:
-      case uint64:
-      case double_:
-      case bool_:
-      case null:
-        return false;
-    }
-    unreachable();
+    return sax_token::is_string(got);
   }
 
   ~sax_token_value() {
     destroy();
   }
-
-  sax_token::kind_e got = sax_token::object_begin;
 
   void expect(uint16_t tokens) const {
     if (!(got & tokens))
@@ -201,46 +309,6 @@ struct sax_parser {
   // Note: 'tok' never will be 'part', its handled by token producer
 };
 
-inline tokens_consumer sax_ignore_value(sax_token& tok) {
-  switch (tok.got) {
-    case sax_token::string:
-    case sax_token::int64:
-    case sax_token::uint64:
-    case sax_token::double_:
-    case sax_token::bool_:
-    case sax_token::null:
-      co_return;
-    default:
-      break;
-  }
-  size_t depth = 0;
-  for (;;) {
-    switch (tok.got) {
-      case sax_token::array_begin:
-      case sax_token::object_begin:
-        depth++;
-        co_yield {};
-        break;
-      case sax_token::part:
-        unreachable();
-      case sax_token::array_end:
-      case sax_token::object_end:
-        depth--;
-        if (depth == 0)
-          co_return;
-        [[fallthrough]];
-      case sax_token::string:
-      case sax_token::int64:
-      case sax_token::uint64:
-      case sax_token::double_:
-      case sax_token::bool_:
-      case sax_token::null:
-      case sax_token::key:
-        co_yield {};
-    }
-  }
-}
-
 }  // namespace omo
 
 namespace std {
@@ -248,7 +316,7 @@ namespace std {
 template <>
 struct formatter<::omo::sax_token> : std::formatter<std::string_view> {
   auto format(::omo::sax_token const& tok, auto& ctx) const -> decltype(ctx.out()) {
-    switch (tok.got) {
+    switch (tok.kind()) {
       case ::omo::sax_token::array_begin:
         return std::format_to(ctx.out(), "array_begin");
       case ::omo::sax_token::array_end:
@@ -258,21 +326,21 @@ struct formatter<::omo::sax_token> : std::formatter<std::string_view> {
       case ::omo::sax_token::object_end:
         return std::format_to(ctx.out(), "object_end");
       case ::omo::sax_token::string:
-        return std::format_to(ctx.out(), "string `{}`", tok.str_m);
+        return std::format_to(ctx.out(), "string `{}`", tok.get_str());
       case ::omo::sax_token::key:
-        return std::format_to(ctx.out(), "key `{}`", tok.str_m);
+        return std::format_to(ctx.out(), "key `{}`", tok.get_key());
       case ::omo::sax_token::int64:
-        return std::format_to(ctx.out(), "int64 `{}`", tok.int_m);
+        return std::format_to(ctx.out(), "int64 `{}`", tok.get_int64());
       case ::omo::sax_token::uint64:
-        return std::format_to(ctx.out(), "uint64 `{}`", tok.uint_m);
+        return std::format_to(ctx.out(), "uint64 `{}`", tok.get_uint64());
       case ::omo::sax_token::double_:
-        return std::format_to(ctx.out(), "double `{}`", tok.double_m);
+        return std::format_to(ctx.out(), "double `{}`", tok.get_double());
       case ::omo::sax_token::bool_:
-        return std::format_to(ctx.out(), "boolean `{}`", tok.bool_m);
+        return std::format_to(ctx.out(), "boolean `{}`", tok.get_bool());
       case ::omo::sax_token::null:
         return std::format_to(ctx.out(), "null");
       case ::omo::sax_token::part:
-        return std::format_to(ctx.out(), "part `{}`", tok.str_m);
+        return std::format_to(ctx.out(), "part `{}`", tok.get_part());
     }
     ::omo::unreachable();
   }

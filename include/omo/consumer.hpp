@@ -2,7 +2,7 @@
 
 #include <kelcoro/stack_memory_resource.hpp>
 
-#include <omo/token.hpp>
+#include "omo/token.hpp"
 
 #include <zal/zal.hpp>
 
@@ -33,12 +33,14 @@ struct token_feeder {
       gen = std::move(old_gen);
     };
     // когда подаётся последняя часть вызывается то частью чего это было - string/key
-    while (tok.got == tok.part) {
-      partbuf += tok.str_m;
+    while (tok.kind() == tok.part) {
+      partbuf += tok.get_part();
       co_yield {};
     }
-    partbuf += tok.str_m;
-    tok.str_m = partbuf;
+    // kind == string/key
+    partbuf += tok.get_str();
+    // подменяем последнюю часть на весь токен целиком
+    tok.set_str(partbuf, tok.kind());
     destroy_gen.no_longer_needed();
     (void)gen.release();
     gen = std::move(old_gen);
@@ -56,8 +58,7 @@ struct token_feeder {
   }
 
   void on_part(std::string_view s) {
-    tok.got = sax_token::part;
-    tok.str_m = s;
+    tok.set_part(s);
     if (!part)
       gen = unite_generate(std::move(gen), dd::with_stack_resource(resource));
     consume();
@@ -78,63 +79,57 @@ struct token_feeder {
   void operator=(token_feeder&&) = delete;
 
   void on_array_begin() {
-    tok.got = kind_e::array_begin;
+    tok.set_array_begin();
     consume();
   }
 
   void on_array_end() {
-    tok.got = kind_e::array_end;
+    tok.set_array_end();
     consume();
   }
 
   void on_object_begin() {
-    tok.got = kind_e::object_begin;
+    tok.set_object_begin();
     consume();
   }
 
   void on_object_end() {
-    tok.got = kind_e::object_end;
+    tok.set_object_end();
     consume();
   }
 
   void on_string(std::string_view s) {
-    tok.got = kind_e::string;
-    tok.str_m = s;
+    tok.set_str(s, sax_token::string);
     consume();
   }
 
   void on_key(std::string_view s) {
-    tok.got = kind_e::key;
-    tok.str_m = s;
+    tok.set_key(s);
     consume();
   }
 
   void on_int64(int64_t i) {
-    tok.got = kind_e::int64;
-    tok.int_m = i;
+    tok.set_int64(i);
     consume();
   }
 
   void on_uint64(uint64_t u) {
-    tok.got = kind_e::uint64;
-    tok.uint_m = u;
+    tok.set_uint64(u);
     consume();
   }
 
   void on_double(double d) {
-    tok.got = kind_e::double_;
-    tok.double_m = d;
+    tok.set_double(d);
     consume();
   }
 
   void on_bool(bool b) {
-    tok.got = kind_e::bool_;
-    tok.bool_m = b;
+    tok.set_bool(b);
     consume();
   }
 
   void on_null() {
-    tok.got = kind_e::null;
+    tok.set_null();
     consume();
   }
 
