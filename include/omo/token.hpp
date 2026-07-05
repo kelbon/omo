@@ -161,6 +161,32 @@ struct sax_token {
   void set_array_end() noexcept {
     got = array_end;
   }
+
+  bool operator==(const sax_token& r) const noexcept {
+    if (r.kind() != kind())
+      return false;
+    switch (kind()) {
+      case array_begin:
+      case array_end:
+      case object_begin:
+      case object_end:
+      case null:
+        return true;
+      case string:
+      case key:
+      case part:
+        return get_str() == r.get_str();
+      case int64:
+        return get_int64() == r.get_int64();
+      case uint64:
+        return get_uint64() == r.get_uint64();
+      case double_:
+        return std::strong_order(get_double(), r.get_double()) == std::strong_ordering::equal;
+      case bool_:
+        return get_bool() == r.get_bool();
+    }
+    unreachable();
+  }
 };
 
 struct sax_token_value {
@@ -176,6 +202,35 @@ struct sax_token_value {
 
  public:
   sax_token_value() {
+  }
+
+  sax_token_value(sax_token_value&& other) noexcept {
+    if (is_string(other.got)) {
+      got = other.got;
+      std::construct_at(&str_m, std::move(other.str_m));
+    } else {
+      std::memcpy((void*)this, &other, sizeof(*this));
+    }
+  }
+
+  sax_token_value(const sax_token_value& other) : sax_token_value(other.to_view()) {
+  }
+
+  sax_token_value& operator=(const sax_token_value& other) {
+    assert(&other != this);  // for perf
+    *this = sax_token_value(other.to_view());
+    return *this;
+  }
+
+  sax_token_value& operator=(sax_token_value&& other) noexcept {
+    assert(&other != this);  // for perf
+    std::destroy_at(this);
+    std::construct_at(this, std::move(other));
+    return *this;
+  }
+
+  ~sax_token_value() {
+    destroy();
   }
 
   sax_token_value(sax_token token) {
@@ -206,22 +261,6 @@ struct sax_token_value {
         bool_m = token.bool_m;
         return;
     }
-  }
-
-  sax_token_value(sax_token_value&& rhs) noexcept {
-    if (is_string(rhs.got)) {
-      got = rhs.got;
-      std::construct_at(&str_m, std::move(rhs.str_m));
-    } else {
-      std::memcpy((void*)this, &rhs, sizeof(*this));
-    }
-  }
-
-  sax_token_value& operator=(sax_token_value&& rhs) noexcept {
-    assert(&rhs != this);  // for perf
-    std::destroy_at(this);
-    std::construct_at(this, std::move(rhs));
-    return *this;
   }
 
   [[nodiscard]] sax_token::kind_e kind() const noexcept {
@@ -282,13 +321,13 @@ struct sax_token_value {
     return sax_token::is_string(got);
   }
 
-  ~sax_token_value() {
-    destroy();
-  }
-
   void expect(uint16_t tokens) const {
     if (!(got & tokens))
       throw parse_error("unexpected token bits `{:b}`, expected bits: `{:b}`", uint16_t(got), tokens);
+  }
+
+  bool operator==(const sax_token_value& r) const noexcept {
+    return to_view() == r.to_view();
   }
 
  private:

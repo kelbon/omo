@@ -8,12 +8,67 @@ using omo::stream_parser;
 using omo::stream_parser_tokens;
 using omo::tokens_consumer;
 
+static void feed(stream_parser& p, std::string_view json, int mode) {
+  switch (mode) {
+    case 0:
+      p.feed(json, /*end=*/true);
+      break;
+    case 1:
+      while (!json.empty() && !p.p.handler().is_done()) {
+        p.feed(json.substr(0, 1), /*end=*/json.size() == 1);
+        json.remove_prefix(1);
+      }
+      break;
+    case 2: {
+      auto mid = json.size() / 2;
+      p.feed(json.substr(0, mid), /*end=*/false);
+      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
+        p.feed(json.substr(mid), /*end=*/true);
+      break;
+    }
+  }
+}
+
+static void feed(stream_parser_tokens& p, std::span<const sax_token_value> json, int mode) {
+  switch (mode) {
+    case 0:
+      p.feed(json, /*end=*/true);
+      break;
+    case 1:
+      while (!json.empty() && !p.is_done()) {
+        p.feed(std::span(json).subspan(0, 1), /*end=*/json.size() == 1);
+        json = json.subspan(1);
+      }
+      break;
+    case 2: {
+      auto mid = json.size() / 2;
+      p.feed(json.subspan(0, mid), /*end=*/false);
+      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
+        p.feed(json.subspan(mid), /*end=*/true);
+      break;
+    }
+  }
+}
+
 static std::vector<sax_token_value> into_tokens(std::string_view json) {
   std::vector<sax_token_value> tokens;
-  omo::stream_parser p([&](sax_token& tok, dd::with_stack_resource) {
-    return omo::sax_ignore_json_value(tok, [&tokens](sax_token& t) { tokens.emplace_back(t); });
+  omo::stream_parser p([&](sax_token& tok, dd::with_stack_resource r) {
+    return omo::sax_ignore_json_value(tok, [&tokens](sax_token& t) { tokens.emplace_back(t); }, r);
   });
   p.feed(json, /*end=*/true);
+  return tokens;
+}
+
+static auto just_collect_value_tokens(std::vector<sax_token_value>& tokens) {
+  return [&tokens](sax_token& tok, dd::with_stack_resource r) {
+    return omo::collect_json_value_tokens(tok, [&tokens](sax_token& t) { tokens.emplace_back(t); }, r);
+  };
+}
+
+static std::vector<sax_token_value> into_tokens_by_parts(std::string_view json, int mode) {
+  std::vector<sax_token_value> tokens;
+  omo::stream_parser p(just_collect_value_tokens(tokens));
+  feed(p, json, mode);
   return tokens;
 }
 
@@ -123,70 +178,34 @@ static tokens_consumer parse(TestObject& v, sax_token& tok, dd::with_stack_resou
   }
 }
 
-static auto make_parser(auto& obj) {
+static stream_parser make_parser(auto& obj) {
   return stream_parser([&obj](sax_token& tok, dd::with_stack_resource r) { return parse(obj, tok, r); });
 }
 
-static auto make_tokens_parser(auto& obj) {
+static stream_parser_tokens make_tokens_parser(auto& obj) {
   return stream_parser_tokens(
       [&obj](sax_token& tok, dd::with_stack_resource r) { return parse(obj, tok, r); });
-}
-
-static void feed(stream_parser& p, std::string_view json, int mode) {
-  switch (mode) {
-    case 0:
-      p.feed(json, /*end=*/true);
-      break;
-    case 1:
-      while (!json.empty()) {
-        p.feed(json.substr(0, 1), /*end=*/json.size() == 1);
-        json.remove_prefix(1);
-      }
-      break;
-    case 2: {
-      auto mid = json.size() / 2;
-      p.feed(json.substr(0, mid), /*end=*/false);
-      p.feed(json.substr(mid), /*end=*/true);
-      break;
-    }
-  }
-}
-
-static void feed(stream_parser_tokens& p, std::span<const sax_token_value> json, int mode) {
-  switch (mode) {
-    case 0:
-      p.feed(json, /*end=*/true);
-      break;
-    case 1:
-      while (!json.empty()) {
-        p.feed(std::span(json).subspan(0, 1), /*end=*/json.size() == 1);
-        json = json.subspan(1);
-      }
-      break;
-    case 2: {
-      auto mid = json.size() / 2;
-      p.feed(json.subspan(0, mid), /*end=*/false);
-      p.feed(json.subspan(mid), /*end=*/true);
-      break;
-    }
-  }
 }
 
 template <typename T>
 [[nodiscard]] static bool parse_twice(std::string_view json, const T& expected, int mode) {
   {
     T object;
-    stream_parser p1 = make_parser(object);
-    feed(p1, json, mode);
+    stream_parser p = make_parser(object);
+    feed(p, json, mode);
     if (object != expected)
+      return false;
+    if (!p.is_done())
       return false;
   }
   {
     T object;
-    stream_parser_tokens p2 = make_tokens_parser(object);
+    stream_parser_tokens p = make_tokens_parser(object);
     std::vector tokens = into_tokens(json);
-    feed(p2, tokens, mode);
+    feed(p, tokens, mode);
     if (object != expected)
+      return false;
+    if (!p.is_done())
       return false;
   }
   return true;
@@ -357,5 +376,228 @@ TEST("Ignore value") {
     REQUIRE(!tokens.empty());
   }
 }
+
+static bool same_output(std::string_view json, int mode) {
+  // собранное за один раз
+  auto toks1 = into_tokens(json);
+  // собранное по частям
+  auto toks2 = into_tokens_by_parts(json, mode);
+  return toks1 == toks2;
+}
+
+static bool cut_json_test(std::string_view json, std::string_view expected_value,
+                          std::string_view expected_tail) {
+  std::string_view val = omo::cut_json_value(json);
+  return val == expected_value && json == expected_tail;
+}
+
+TEST("cut json value") {
+  REQUIRE(cut_json_test("{}{}", "{}", "{}"));
+  REQUIRE(cut_json_test("[1,2] [3,4]", "[1,2] ", "[3,4]"));
+  REQUIRE(cut_json_test("1 2 3", "1 ", "2 3"));
+  REQUIRE(cut_json_test("\"a\" \"b\"", "\"a\" ", "\"b\""));
+  REQUIRE(cut_json_test("null null", "null ", "null"));
+  REQUIRE(cut_json_test("{\"a\":1} trailing garbage", "{\"a\":1} ", "trailing garbage"));
+}
+
+TEST("collect value tokens") {
+  int mode = GENERATE(0, 1, 2);
+
+  // -- пустые контейнеры --
+  REQUIRE(same_output("{}", mode));
+  REQUIRE(same_output("[]", mode));
+  REQUIRE(same_output("\"\"", mode));
+
+  // -- примитивы --
+  REQUIRE(same_output("null", mode));
+  REQUIRE(same_output("true", mode));
+  REQUIRE(same_output("false", mode));
+
+  // -- числа --
+  REQUIRE(same_output("0", mode));
+  REQUIRE(same_output("42", mode));
+  REQUIRE(same_output("-17", mode));
+  REQUIRE(same_output("3.14", mode));
+  REQUIRE(same_output("-0.001", mode));
+  REQUIRE(same_output("1e10", mode));
+  REQUIRE(same_output("1E-10", mode));
+  REQUIRE(same_output("2.5e+3", mode));
+
+  // -- строки --
+  REQUIRE(same_output("\"hello\"", mode));
+  REQUIRE(same_output("\"hello world\"", mode));
+  REQUIRE(same_output("\"line1\\nline2\"", mode));
+  REQUIRE(same_output("\"tab\\tchar\"", mode));
+  REQUIRE(same_output("\"quote\\\"inside\"", mode));
+  REQUIRE(same_output("\"backslash\\\\\"", mode));
+  REQUIRE(same_output("\"unicode\\u00e9\"", mode));
+  REQUIRE(same_output("\"emoji\\ud83d\\ude00\"", mode));  // surrogate pair
+  REQUIRE(same_output("\"{ not really an object }\"", mode));
+  REQUIRE(same_output("\"[1,2,3] looks like array but is string\"", mode));
+
+  // -- простые объекты/массивы --
+  REQUIRE(same_output("{\"a\":1}", mode));
+  REQUIRE(same_output("{\"a\":1,\"b\":2}", mode));
+  REQUIRE(same_output("[1,2,3]", mode));
+  REQUIRE(same_output("[1,\"two\",3.0,null,true,false]", mode));
+
+  // -- вложенность --
+  REQUIRE(same_output("{\"a\":{\"b\":{\"c\":1}}}", mode));
+  REQUIRE(same_output("[[1,2],[3,4]]", mode));
+  REQUIRE(same_output("[[[]]]", mode));
+  REQUIRE(same_output("{\"a\":[1,2,{\"b\":3}]}", mode));
+  REQUIRE(same_output("[{\"a\":1},{\"b\":2}]", mode));
+  REQUIRE(same_output("{\"arr\":[[1,[2,3]],{\"x\":[4,5]}]}", mode));
+
+  // -- ключи и значения с "опасными" символами --
+  REQUIRE(same_output("{\"key with spaces\":1}", mode));
+  REQUIRE(same_output("{\"\":\"empty key\"}", mode));
+  REQUIRE(same_output("{\"a\":\"\"}", mode));
+  REQUIRE(same_output("{\"nested\":{}}", mode));
+  REQUIRE(same_output("{\"nested\":[]}", mode));
+
+  // -- пробелы/форматирование --
+  REQUIRE(same_output("   {}   ", mode));
+  REQUIRE(same_output("{ \"a\" : 1 , \"b\" : 2 }", mode));
+  REQUIRE(same_output("[\n  1,\n  2,\n  3\n]", mode));
+  REQUIRE(same_output("{\r\n\t\"a\"\r\n:\r\n1\r\n}", mode));
+
+  // -- несколько значений подряд (проверка что отрезается именно первое) --
+  REQUIRE(same_output("{}{}", mode));
+  REQUIRE(same_output("[1,2] [3,4]", mode));
+  REQUIRE(same_output("1 2 3", mode));
+  REQUIRE(same_output("\"a\" \"b\"", mode));
+  REQUIRE(same_output("null null", mode));
+  REQUIRE(same_output("{\"a\":1} trailing garbage", mode));
+
+  // -- большие/глубокие структуры --
+  REQUIRE(same_output("[1,2,3,4,5,6,7,8,9,10,11,12,13,14,15]", mode));
+  REQUIRE(same_output("{\"a\":{\"b\":{\"c\":{\"d\":{\"e\":{\"f\":1}}}}}}", mode));
+
+  // -- смешанные массивы объектов с разными типами полей --
+  REQUIRE(
+      same_output("[{\"id\":1,\"tags\":[\"x\",\"y\"],\"active\":true,\"meta\":null},"
+                  "{\"id\":2,\"tags\":[],\"active\":false,\"meta\":{\"note\":\"ok\"}}]",
+                  mode));
+
+  // -- числа на границах --
+  REQUIRE(same_output("9223372036854775807", mode));     // INT64_MAX
+  REQUIRE(same_output("-9223372036854775808", mode));    // INT64_MIN
+  REQUIRE(same_output("1.7976931348623157e308", mode));  // DBL_MAX
+  REQUIRE(same_output("0.0", mode));
+  REQUIRE(same_output("-0", mode));
+}
+
+TEST("stream_parser_tokens stops after first value") {
+  auto check = [](std::string_view first_json, std::string_view second_json) {
+    std::vector<sax_token_value> first_tokens = into_tokens(first_json);
+    std::vector<sax_token_value> second_tokens = into_tokens(second_json);
+
+    std::vector<sax_token_value> combined = first_tokens;
+    combined.insert(combined.end(), second_tokens.begin(), second_tokens.end());
+
+    std::vector<sax_token_value> collected;
+    omo::stream_parser_tokens p(just_collect_value_tokens(collected));
+
+    // фидим сразу оба value одним span'ом
+    size_t consumed = p.feed(combined, /*end=*/false);
+
+    // должно быть съедено ровно столько токенов, сколько в первом value
+    if (consumed != first_tokens.size())
+      return false;
+
+    // парсер должен считать себя завершённым после первого value
+    if (!p.is_done())
+      return false;
+
+    // собраны должны быть только токены первого value, второй нетронут
+    if (collected != first_tokens)
+      return false;
+
+    return true;
+  };
+
+  SECTION("two scalars") {
+    REQUIRE(check("1", "2"));
+  }
+
+  SECTION("object then string") {
+    REQUIRE(check("{}", "\"another\""));
+  }
+
+  SECTION("array then number") {
+    REQUIRE(check("[1,2]", "3"));
+  }
+
+  SECTION("object then object") {
+    REQUIRE(check(R"({"a":1})", R"({"b":2})"));
+  }
+
+  SECTION("nested then scalar") {
+    REQUIRE(check(R"({"a":[1,{"b":2}]})", "null"));
+  }
+}
+
+TEST("stream_parser_tokens feed return value counts consumed tokens exactly") {
+  SECTION("single feed, whole value, no trailing data") {
+    std::vector<sax_token_value> tokens = into_tokens(R"({"a":[1,2,3]})");
+
+    std::vector<sax_token_value> collected;
+    omo::stream_parser_tokens p(just_collect_value_tokens(collected));
+
+    size_t consumed = p.feed(tokens, /*end=*/true);
+    REQUIRE(consumed == tokens.size());
+    REQUIRE(p.is_done());
+    REQUIRE(collected == tokens);
+  }
+
+  SECTION("feed one token at a time sums up to total") {
+    std::vector<sax_token_value> tokens = into_tokens(R"({"a":[1,2,3]})");
+
+    std::vector<sax_token_value> collected;
+    omo::stream_parser_tokens p(just_collect_value_tokens(collected));
+
+    size_t total_consumed = 0;
+    std::span<const sax_token_value> remaining(tokens);
+    while (!remaining.empty() && !p.is_done()) {
+      bool last = remaining.size() == 1;
+      size_t consumed = p.feed(remaining.subspan(0, 1), /*end=*/last);
+      REQUIRE(consumed == 1);
+      total_consumed += consumed;
+      remaining = remaining.subspan(1);
+    }
+
+    REQUIRE(total_consumed == tokens.size());
+    REQUIRE(p.is_done());
+    REQUIRE(collected == tokens);
+  }
+
+  SECTION("consumed count excludes tokens belonging to a following value") {
+    std::vector<sax_token_value> first = into_tokens("[1,2,3]");
+    std::vector<sax_token_value> second = into_tokens(R"({"x":1})");
+
+    std::vector<sax_token_value> combined = first;
+    combined.insert(combined.end(), second.begin(), second.end());
+
+    omo::stream_parser_tokens p([](sax_token& tok, dd::with_stack_resource r) {
+      return omo::sax_ignore_json_value(tok, [](sax_token&) {}, r);
+    });
+
+    size_t consumed = p.feed(combined, /*end=*/false);
+    REQUIRE(consumed == first.size());
+    REQUIRE(p.is_done());
+
+    // остаток можно доскормить новому парсеру и получить второе значение целиком
+    std::vector<sax_token_value> collected_second;
+    omo::stream_parser_tokens p2(just_collect_value_tokens(collected_second));
+    std::span<const sax_token_value> tail(combined);
+    tail = tail.subspan(consumed);
+    size_t consumed2 = p2.feed(tail, /*end=*/true);
+    REQUIRE(consumed2 == second.size());
+    REQUIRE(p2.is_done());
+    REQUIRE(collected_second == second);
+  }
+}
+
 REGISTER_TEST_LISTENER(moko3::gtest_listener);
 MOKO3_MAIN;

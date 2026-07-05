@@ -236,4 +236,83 @@ struct boostjson_token_feeder : token_feeder {
   }
 };
 
+struct boostjson_noop_handler {
+  static constexpr size_t max_array_size = -1;
+  static constexpr size_t max_object_size = -1;
+  static constexpr size_t max_string_size = -1;
+  static constexpr size_t max_key_size = -1;
+
+  bool on_document_begin(boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_document_end(boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_array_begin(boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_array_end(size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_object_begin(boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_object_end(size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_string(std::string_view, size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_key(std::string_view, size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_int64(int64_t, std::string_view, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_uint64(uint64_t, std::string_view, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_double(double, std::string_view, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_bool(bool, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_null(boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_string_part(std::string_view, size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_comment_part(std::string_view, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_key_part(std::string_view, size_t, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_number_part(std::string_view, boost::system::error_code&) {
+    return true;
+  }
+
+  bool on_comment(std::string_view, boost::system::error_code&) {
+    return true;
+  }
+};
+
 }  // namespace omo

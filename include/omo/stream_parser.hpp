@@ -9,6 +9,22 @@
 
 namespace omo {
 
+inline std::string_view cut_json_value(std::string_view& json) {
+  boost::json::basic_parser<boostjson_noop_handler> p(/*opt=*/{});
+  boost::system::error_code ec;
+  size_t cutted;
+  try {
+    cutted = p.write_some(/*more=*/true, json.data(), json.size(), ec);
+  } catch (std::exception& e) {
+    throw parse_error("invalid json, {}", e.what());
+  }
+  if (ec)
+    throw parse_error("invalid json, {}", ec.message());
+  std::string_view json_value = json.substr(0, cutted);
+  json.remove_prefix(cutted);
+  return json_value;
+}
+
 struct stream_parser {
   boost::json::basic_parser<boostjson_token_feeder> p;
 
@@ -20,10 +36,14 @@ struct stream_parser {
 
   // Note: MUST NOT be reused after parsing value
   // each value should be parsed by new stream_parser
-  void feed(std::string_view data, bool end) {
+  // возвращает количество успешно обработанных символов (может быть меньше data.size())
+  // если одно json value распаршено и есть следующее, то парсинг прекращается и возвращается длина
+  // только обработанных данных (до следующего значения)
+  size_t feed(std::string_view data, bool end) {
     boost::system::error_code ec;
+    size_t ret;
     try {
-      p.write_some(!end, data.data(), data.size(), ec);
+      ret = p.write_some(!end, data.data(), data.size(), ec);
     } catch (std::exception& e) {
       throw parse_error("stream_parser fail, err: `{}`, is last part: {}, input: `{}`", e.what(), end, data);
     }
@@ -34,6 +54,12 @@ struct stream_parser {
     // The json output has ended, but the generator is still expecting more tokens
     if (end && !p.handler().is_done()) [[unlikely]]
       throw parse_error("input is over, but parsing not ended, input: `{}`", data);
+    return ret;
+  }
+
+  // значение было распаршено
+  [[nodiscard]] bool is_done() const noexcept {
+    return p.handler().is_done();
   }
 };
 
@@ -51,40 +77,46 @@ struct stream_parser_tokens {
       : resource(buf), gen(make_parser(tok, dd::with_stack_resource(resource))) {
   }
 
+  // если одно json value распаршено и есть следующее, то парсинг прекращается
+  // если после feed is_done() == true, но не все токены обработаны, это значит что оставшееся - другое json
+  // значение
+  // возвращает количество обработанных токенов
   // pre: tokens НЕ содержит part
-  void feed(std::ranges::range auto&& tokens, bool end) {
+  template <std::ranges::range R>
+  size_t feed(R&& tokens, bool end) {
     auto it = gen.cur_iterator();
-    for (const sax_token_value& t : tokens) {
+    constexpr bool can_distance = std::ranges::random_access_range<R>;
+    size_t handled = 0;
+    auto b = std::ranges::begin(tokens);
+    auto e = std::ranges::end(tokens);
+    for (; b != e; ++b) {
+      if (it == gen.end()) [[unlikely]]  // парсер кончился раньше чем токены
+        break;
+      auto& t = *b;
       // инвариант, что генератор никогда не увидит part
       assert(t.kind() != sax_token::part);
-      if (it == gen.end()) [[unlikely]]  // парсер кончился раньше чем токены
-        throw parse_error("parser ends, but not all tokens are consumed");
       tok = t.to_view();
       ++it;
+      if constexpr (!can_distance)
+        ++handled;
     }
     if (end && it != gen.end())  // токены кончились раньше парсера
       throw parse_error("input is over, but parsing not ended");
+    if constexpr (can_distance)
+      return std::distance(std::ranges::begin(tokens), b);
+    else
+      return handled;
   }
 
-  // то же самое, что feed но для вью на токены
-  // pre: tokens НЕ содержит part
-  void feed_views(std::ranges::range auto&& tokens, bool end) {
-    auto it = gen.cur_iterator();
-    for (const sax_token& t : tokens) {
-      // инвариант, что генератор никогда не увидит part
-      assert(t.kind() != sax_token::part);
-      if (it == gen.end()) [[unlikely]]  // парсер кончился раньше чем токены
-        throw parse_error("parser ends, but not all tokens are consumed");
-      tok = t;
-      ++it;
-    }
-    if (end && it != gen.end())  // токены кончились раньше парсера
-      throw parse_error("input is over, but parsing not ended");
+  // значение было распаршено
+  [[nodiscard]] bool is_done() const noexcept {
+    return gen.empty();
   }
 };
 
 // `on_token` вызывается передавая tok каждый раз когда новый токен получен
-inline tokens_consumer sax_ignore_json_value(sax_token& tok, auto on_token) {
+// может выдавать и part токены
+inline tokens_consumer sax_ignore_json_value(sax_token& tok, auto on_token, dd::with_stack_resource r) {
   on_token(tok);
   switch (tok.kind()) {
     case sax_token::string:
@@ -106,8 +138,6 @@ inline tokens_consumer sax_ignore_json_value(sax_token& tok, auto on_token) {
         co_yield {};
         on_token(tok);
         break;
-      case sax_token::part:
-        unreachable();
       case sax_token::array_end:
       case sax_token::object_end:
         --depth;
@@ -121,11 +151,38 @@ inline tokens_consumer sax_ignore_json_value(sax_token& tok, auto on_token) {
       case sax_token::bool_:
       case sax_token::null:
       case sax_token::key:
+      case sax_token::part:
         co_yield {};
         on_token(tok);
         break;
     }
   }
 }
+
+// не может выдать part токен, складывает их корректно в один конечный токен
+inline tokens_consumer collect_json_value_tokens(sax_token& token, auto on_token, dd::with_stack_resource r) {
+  auto foo = [part = std::optional<sax_token_value>{}, on_token = std::move(on_token)](sax_token& s) mutable {
+    if (part) [[unlikely]] {
+      if (s.kind() == sax_token::part) {
+        part->combine_parts(s.get_str());
+      } else if (s.kind() == sax_token::key || s.kind() == sax_token::string) {
+        part->replace_part(s.get_str(), s.kind());
+        sax_token part_tok = part->to_view();
+        on_token(part_tok);  // если надо сохранить парт, то в on_token будет создано значение заново
+        part.reset();
+      } else {
+        throw parse_error("invalid `part` token");
+      }
+      return;
+    }
+    if (s.kind() == sax_token::part) [[unlikely]] {
+      part = s;
+      return;
+    }
+    on_token(s);
+    return;
+  };
+  return sax_ignore_json_value(token, std::move(foo), r);
+};
 
 }  // namespace omo
