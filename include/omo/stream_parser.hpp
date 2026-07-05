@@ -1,6 +1,6 @@
 #pragma once
 
-#include "omo/consumer.hpp"
+#include "omo/token_feeder.hpp"
 #include "omo/token.hpp"
 
 #include <boost/json.hpp>
