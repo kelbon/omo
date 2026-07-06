@@ -11,7 +11,6 @@
 namespace omo {
 
 // принимает на вход токены и функцию для создания парсера
-
 struct token_feeder {
  protected:
   using kind_e = sax_token::kind_e;
@@ -57,13 +56,6 @@ struct token_feeder {
     throw parse_error("unexpected token `{}` after complete json parsing", tok);
   }
 
-  void on_part(std::string_view s) {
-    tok.set_part(s);
-    if (!part)
-      gen = unite_generate(std::move(gen), dd::with_stack_resource(resource));
-    consume();
-  }
-
   void consume() {
     // may throw
     ++gen.cur_iterator();
@@ -77,6 +69,24 @@ struct token_feeder {
 
   token_feeder(token_feeder&&) = delete;
   void operator=(token_feeder&&) = delete;
+
+  void consume_not_part(const sax_token& t) {
+    assert(t.kind() != part);
+    tok = t;
+    consume();
+  }
+  void consume(const sax_token& t) {
+    if (t.kind() == part)
+      return on_part(t.get_part());
+    consume_not_part(t);
+  }
+
+  void on_part(std::string_view s) {
+    tok.set_part(s);
+    if (!part)
+      gen = unite_generate(std::move(gen), dd::with_stack_resource(resource));
+    consume();
+  }
 
   void on_array_begin() {
     tok.set_array_begin();

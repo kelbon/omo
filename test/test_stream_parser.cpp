@@ -8,48 +8,6 @@ using omo::stream_parser;
 using omo::stream_parser_tokens;
 using omo::tokens_consumer;
 
-static void feed(stream_parser& p, std::string_view json, int mode) {
-  switch (mode) {
-    case 0:
-      p.feed(json, /*end=*/true);
-      break;
-    case 1:
-      while (!json.empty() && !p.p.handler().is_done()) {
-        p.feed(json.substr(0, 1), /*end=*/json.size() == 1);
-        json.remove_prefix(1);
-      }
-      break;
-    case 2: {
-      auto mid = json.size() / 2;
-      p.feed(json.substr(0, mid), /*end=*/false);
-      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
-        p.feed(json.substr(mid), /*end=*/true);
-      break;
-    }
-  }
-}
-
-static void feed(stream_parser_tokens& p, std::span<const sax_token_value> json, int mode) {
-  switch (mode) {
-    case 0:
-      p.feed(json, /*end=*/true);
-      break;
-    case 1:
-      while (!json.empty() && !p.is_done()) {
-        p.feed(std::span(json).subspan(0, 1), /*end=*/json.size() == 1);
-        json = json.subspan(1);
-      }
-      break;
-    case 2: {
-      auto mid = json.size() / 2;
-      p.feed(json.subspan(0, mid), /*end=*/false);
-      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
-        p.feed(json.subspan(mid), /*end=*/true);
-      break;
-    }
-  }
-}
-
 static std::vector<sax_token_value> into_tokens(std::string_view json) {
   std::vector<sax_token_value> tokens;
   omo::stream_parser p([&](sax_token& tok, dd::with_stack_resource r) {
@@ -59,13 +17,61 @@ static std::vector<sax_token_value> into_tokens(std::string_view json) {
   return tokens;
 }
 
+enum mode_e {
+  whole,
+  by_one,
+  two_parts,
+};
+
+static void feed(stream_parser& p, std::string_view json, mode_e mode) {
+  switch (mode) {
+    case whole:
+      p.feed(json, /*end=*/true);
+      break;
+    case by_one:
+      while (!json.empty() && !p.p.handler().is_done()) {
+        p.feed(json.substr(0, 1), /*end=*/json.size() == 1);
+        json.remove_prefix(1);
+      }
+      break;
+    case two_parts: {
+      auto mid = json.size() / 2;
+      p.feed(json.substr(0, mid), /*end=*/false);
+      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
+        p.feed(json.substr(mid), /*end=*/true);
+      break;
+    }
+  }
+}
+
+static void feed(stream_parser_tokens& p, std::span<const sax_token_value> json, mode_e mode) {
+  switch (mode) {
+    case whole:
+      p.feed(json, /*end=*/true);
+      break;
+    case by_one:
+      while (!json.empty() && !p.is_done()) {
+        p.feed(std::span(json).subspan(0, 1), /*end=*/json.size() == 1);
+        json = json.subspan(1);
+      }
+      break;
+    case two_parts: {
+      auto mid = json.size() / 2;
+      p.feed(json.subspan(0, mid), /*end=*/false);
+      if (!p.is_done())  // не продолжаем парсинг, если значение уже спаршено (идёт следующее значение уже)
+        p.feed(json.subspan(mid), /*end=*/true);
+      break;
+    }
+  }
+}
+
 static auto just_collect_value_tokens(std::vector<sax_token_value>& tokens) {
   return [&tokens](sax_token& tok, dd::with_stack_resource r) {
     return omo::collect_json_value_tokens(tok, [&tokens](sax_token& t) { tokens.emplace_back(t); }, r);
   };
 }
 
-static std::vector<sax_token_value> into_tokens_by_parts(std::string_view json, int mode) {
+static std::vector<sax_token_value> into_tokens_by_parts(std::string_view json, mode_e mode) {
   std::vector<sax_token_value> tokens;
   omo::stream_parser p(just_collect_value_tokens(tokens));
   feed(p, json, mode);
@@ -188,7 +194,7 @@ static stream_parser_tokens make_tokens_parser(auto& obj) {
 }
 
 template <typename T>
-[[nodiscard]] static bool parse_twice(std::string_view json, const T& expected, int mode) {
+[[nodiscard]] static bool parse_twice(std::string_view json, const T& expected, mode_e mode) {
   {
     T object;
     stream_parser p = make_parser(object);
@@ -211,8 +217,12 @@ template <typename T>
   return true;
 }
 
-TEST("scalar fields") {
-  int mode = GENERATE(0, 1, 2);
+#define GENERATE_ALL_MODES GENERATE(whole, by_one, two_parts)
+
+TEST("parse") {
+  mode_e mode = GENERATE_ALL_MODES;
+
+  // scalar fields
 
   SECTION("int positive") {
     REQUIRE(parse_twice(R"({"int_field":123})", TestObject{.int_field = 123}, mode));
@@ -241,10 +251,8 @@ TEST("scalar fields") {
   SECTION("string") {
     REQUIRE(parse_twice(R"({"string_field":"hello"})", TestObject{.string_field = "hello"}, mode));
   }
-}
 
-TEST("optional null") {
-  int mode = GENERATE(0, 1, 2);
+  // optional null
 
   SECTION("double null") {
     REQUIRE(parse_twice(R"({"double_field":null})", TestObject{}, mode));
@@ -253,10 +261,8 @@ TEST("optional null") {
   SECTION("string null") {
     REQUIRE(parse_twice(R"({"string_field":null})", TestObject{}, mode));
   }
-}
 
-TEST("array field") {
-  int mode = GENERATE(0, 1, 2);
+  // array field
 
   SECTION("non-empty") {
     REQUIRE(parse_twice(R"({"array_field":[1,2,3]})",
@@ -270,10 +276,8 @@ TEST("array field") {
   SECTION("null") {
     REQUIRE(parse_twice(R"({"array_field":null})", TestObject{}, mode));
   }
-}
 
-TEST("nested objects") {
-  int mode = GENERATE(0, 1, 2);
+  // nested objects
 
   SECTION("single nested") {
     TestObject inner{.int_field = 7};
@@ -286,10 +290,8 @@ TEST("nested objects") {
     REQUIRE(parse_twice(R"({"nested_objects":[null,{"int_field":1}]})",
                         TestObject{.nested_objects = {{{std::nullopt, inner}}}}, mode));
   }
-}
 
-TEST("all fields") {
-  int mode = GENERATE(0, 1, 2);
+  // all fields
 
   REQUIRE(parse_twice(R"({"int_field":1,"double_field":2.5,"bool_field":true,)"
                       R"("string_field":"x","array_field":[10,20]})",
@@ -377,7 +379,7 @@ TEST("Ignore value") {
   }
 }
 
-static bool same_output(std::string_view json, int mode) {
+[[nodiscard]] static bool same_output(std::string_view json, mode_e mode) {
   // собранное за один раз
   auto toks1 = into_tokens(json);
   // собранное по частям
@@ -385,23 +387,112 @@ static bool same_output(std::string_view json, int mode) {
   return toks1 == toks2;
 }
 
-static bool cut_json_test(std::string_view json, std::string_view expected_value,
-                          std::string_view expected_tail) {
+static boost::json::value tokens2value(std::span<const sax_token_value> tokens) {
+  boost::json::value v;
+  auto make_consumer = [&](sax_token& tok, dd::with_stack_resource r) {
+    return omo::json_value_collector(tok, v, r);
+  };
+  stream_parser_tokens parser(make_consumer);
+  parser.feed(tokens, /*end=*/true);
+
+  return v;
+}
+
+[[nodiscard]] static bool test_cut_json(std::string_view json, std::string_view expected_value,
+                                        std::string_view expected_tail) {
+  const std::string_view init_json = json;
   std::string_view val = omo::cut_json_value(json);
+  if (!expected_value.empty()) {
+    boost::json::value expected = boost::json::parse(expected_value);
+    std::vector toks = into_tokens(init_json);
+    bool found = false;
+    auto it = omo::cut_json_value(toks, found);
+    if (!found)
+      return false;
+    boost::json::value v = tokens2value(std::span(toks).subspan(0, std::distance(toks.begin(), it)));
+    if (expected != v)
+      return false;
+  } else {
+    std::vector toks = into_tokens(init_json);
+    bool found = false;
+    auto it = omo::cut_json_value(toks, found);
+    if (found || it != toks.end())
+      return false;
+  }
   return val == expected_value && json == expected_tail;
 }
 
 TEST("cut json value") {
-  REQUIRE(cut_json_test("{}{}", "{}", "{}"));
-  REQUIRE(cut_json_test("[1,2] [3,4]", "[1,2] ", "[3,4]"));
-  REQUIRE(cut_json_test("1 2 3", "1 ", "2 3"));
-  REQUIRE(cut_json_test("\"a\" \"b\"", "\"a\" ", "\"b\""));
-  REQUIRE(cut_json_test("null null", "null ", "null"));
-  REQUIRE(cut_json_test("{\"a\":1} trailing garbage", "{\"a\":1} ", "trailing garbage"));
+  // --- базовые примитивы ---
+  REQUIRE(test_cut_json("{}{}", "{}", "{}"));
+  REQUIRE(test_cut_json("[1,2] [3,4]", "[1,2] ", "[3,4]"));
+  REQUIRE(test_cut_json("1 2 3", "1 ", "2 3"));
+  REQUIRE(test_cut_json(R"("a" "b")", R"("a" )", R"("b")"));
+  REQUIRE(test_cut_json("null null", "null ", "null"));
+  REQUIRE(test_cut_json(R"({"a":1} trailing garbage)", R"({"a":1} )", "trailing garbage"));
+
+  // --- булевы значения ---
+  REQUIRE(test_cut_json("true false", "true ", "false"));
+  REQUIRE(test_cut_json("false,true", "false", ",true"));
+
+  // --- числа: разные форматы ---
+  REQUIRE(test_cut_json("0 1", "0 ", "1"));
+  REQUIRE(test_cut_json("-1 2", "-1 ", "2"));
+  REQUIRE(test_cut_json("-0.5 2", "-0.5 ", "2"));
+  REQUIRE(test_cut_json("1.5e10 x", "1.5e10 ", "x"));
+  REQUIRE(test_cut_json("1E+10,2", "1E+10", ",2"));
+  REQUIRE(test_cut_json("1e-10 tail", "1e-10 ", "tail"));
+  REQUIRE(test_cut_json("123456789012345 rest", "123456789012345 ", "rest"));
+
+  // --- строки: экранирование, юникод, пустая строка ---
+  REQUIRE(test_cut_json(R"("" rest)", R"("" )", "rest"));
+  REQUIRE(test_cut_json(R"("hello\"world" rest)", R"("hello\"world" )", "rest"));
+  REQUIRE(test_cut_json(R"("line\nbreak" rest)", R"("line\nbreak" )", "rest"));
+  REQUIRE(test_cut_json(R"("back\\slash" rest)", R"("back\\slash" )", "rest"));
+  REQUIRE(test_cut_json(R"("\u0041\u00e9" rest)", R"("\u0041\u00e9" )", "rest"));
+  REQUIRE(test_cut_json(R"("{not an object}" rest)", R"("{not an object}" )", "rest"));
+  REQUIRE(test_cut_json(R"("[not,an,array]" rest)", R"("[not,an,array]" )", "rest"));
+
+  // --- массивы: пустые, вложенные, смешанные типы ---
+  REQUIRE(test_cut_json("[] rest", "[] ", "rest"));
+  REQUIRE(test_cut_json("[[1,2],[3,4]] rest", "[[1,2],[3,4]] ", "rest"));
+  REQUIRE(test_cut_json(R"([1,"a",true,null,{"x":1}] rest)", R"([1,"a",true,null,{"x":1}] )", "rest"));
+  REQUIRE(test_cut_json(R"(["]", "}"] rest)", R"(["]", "}"] )", "rest"));
+
+  // --- объекты: пустые, вложенные ---
+  REQUIRE(test_cut_json("{} rest", "{} ", "rest"));
+  REQUIRE(test_cut_json(R"({"a":{"b":{"c":1}}} rest)", R"({"a":{"b":{"c":1}}} )", "rest"));
+  REQUIRE(
+      test_cut_json(R"({"key with }": "value with {"} rest)", R"({"key with }": "value with {"} )", "rest"));
+  REQUIRE(test_cut_json(R"({"a":[1,2,{"b":3}]} rest)", R"({"a":[1,2,{"b":3}]} )", "rest"));
+
+  // --- пробелы/переносы вокруг значения ---
+  REQUIRE(test_cut_json("   1 2", "   1 ", "2"));
+  REQUIRE(test_cut_json("\n\t{\"a\":1}\n\ttail", "\n\t{\"a\":1}\n\t", "tail"));
+  REQUIRE(test_cut_json("1\r\n2", "1\r\n", "2"));
+
+  // --- нет хвоста / нет разделителя ---
+  REQUIRE(test_cut_json("42", "42", ""));
+  REQUIRE(test_cut_json(R"({"a":1})", R"({"a":1})", ""));
+  REQUIRE(test_cut_json("[1,2,3]", "[1,2,3]", ""));
+  REQUIRE(test_cut_json(R"("only string")", R"("only string")", ""));
+
+  // --- хвост — произвольный мусор (не JSON) ---
+  REQUIRE(test_cut_json("1 }}}invalid[[[", "1 ", "}}}invalid[[["));
+  REQUIRE(test_cut_json(R"("a" !@#$%^&*)", R"("a" )", "!@#$%^&*"));
+  REQUIRE(test_cut_json("null ", "null ", ""));
+
+  // --- числа/значения впритык к разделителям без пробела ---
+  REQUIRE(test_cut_json("1,2,3", "1", ",2,3"));
+  REQUIRE(test_cut_json(R"({"a":1},{"b":2})", R"({"a":1})", R"(,{"b":2})"));
+  REQUIRE(test_cut_json("[1][2]", "[1]", "[2]"));
+
+  // --- глубокая вложенность ---
+  REQUIRE(test_cut_json("[[[[[1]]]]] rest", "[[[[[1]]]]] ", "rest"));
 }
 
 TEST("collect value tokens") {
-  int mode = GENERATE(0, 1, 2);
+  mode_e mode = GENERATE_ALL_MODES;
 
   // -- пустые контейнеры --
   REQUIRE(same_output("{}", mode));
@@ -500,7 +591,7 @@ TEST("stream_parser_tokens stops after first value") {
     omo::stream_parser_tokens p(just_collect_value_tokens(collected));
 
     // фидим сразу оба value одним span'ом
-    size_t consumed = p.feed(combined, /*end=*/false);
+    size_t consumed = std::distance(combined.begin(), p.feed(combined, /*end=*/false));
 
     // должно быть съедено ровно столько токенов, сколько в первом value
     if (consumed != first_tokens.size())
@@ -545,7 +636,7 @@ TEST("stream_parser_tokens feed return value counts consumed tokens exactly") {
     std::vector<sax_token_value> collected;
     omo::stream_parser_tokens p(just_collect_value_tokens(collected));
 
-    size_t consumed = p.feed(tokens, /*end=*/true);
+    size_t consumed = std::distance(tokens.begin(), p.feed(tokens, /*end=*/true));
     REQUIRE(consumed == tokens.size());
     REQUIRE(p.is_done());
     REQUIRE(collected == tokens);
@@ -561,7 +652,8 @@ TEST("stream_parser_tokens feed return value counts consumed tokens exactly") {
     std::span<const sax_token_value> remaining(tokens);
     while (!remaining.empty() && !p.is_done()) {
       bool last = remaining.size() == 1;
-      size_t consumed = p.feed(remaining.subspan(0, 1), /*end=*/last);
+      std::span tofeed = remaining.subspan(0, 1);
+      size_t consumed = std::distance(tofeed.begin(), p.feed(tofeed, /*end=*/last));
       REQUIRE(consumed == 1);
       total_consumed += consumed;
       remaining = remaining.subspan(1);
@@ -583,7 +675,7 @@ TEST("stream_parser_tokens feed return value counts consumed tokens exactly") {
       return omo::sax_ignore_json_value(tok, [](sax_token&) {}, r);
     });
 
-    size_t consumed = p.feed(combined, /*end=*/false);
+    size_t consumed = std::distance(combined.begin(), p.feed(combined, /*end=*/false));
     REQUIRE(consumed == first.size());
     REQUIRE(p.is_done());
 
@@ -592,11 +684,57 @@ TEST("stream_parser_tokens feed return value counts consumed tokens exactly") {
     omo::stream_parser_tokens p2(just_collect_value_tokens(collected_second));
     std::span<const sax_token_value> tail(combined);
     tail = tail.subspan(consumed);
-    size_t consumed2 = p2.feed(tail, /*end=*/true);
+    size_t consumed2 = std::distance(tail.begin(), p2.feed(tail, /*end=*/true));
     REQUIRE(consumed2 == second.size());
     REQUIRE(p2.is_done());
     REQUIRE(collected_second == second);
   }
+}
+
+static boost::json::value parse_by_generator(std::string_view json, mode_e mode) {
+  unsigned char buf[512];
+  boost::json::value v;
+  stream_parser parser(
+      [&](sax_token& tok, dd::with_stack_resource r) { return omo::json_value_collector(tok, v, r); }, buf);
+  feed(parser, json, mode);
+  return v;
+}
+
+[[nodiscard]] static bool test_collecting_json_value(std::string_view json, mode_e mode) {
+  boost::json::value v = boost::json::parse(json);
+  boost::json::value v2 = parse_by_generator(json, mode);
+  return v == v2;
+}
+
+TEST("collecting json value") {
+  mode_e mode = GENERATE_ALL_MODES;
+  REQUIRE(test_collecting_json_value("0", mode));
+  REQUIRE(test_collecting_json_value("{}", mode));
+  REQUIRE(test_collecting_json_value("[]", mode));
+  REQUIRE(test_collecting_json_value("null", mode));
+  REQUIRE(test_collecting_json_value("\"\"", mode));
+  REQUIRE(test_collecting_json_value("true", mode));
+  REQUIRE(test_collecting_json_value("false", mode));
+  REQUIRE(test_collecting_json_value("1", mode));
+  REQUIRE(test_collecting_json_value("-1", mode));
+  REQUIRE(test_collecting_json_value("1.5", mode));
+  REQUIRE(test_collecting_json_value("1e10", mode));
+  REQUIRE(test_collecting_json_value("-1.5e-10", mode));
+  REQUIRE(test_collecting_json_value("true", mode));
+  REQUIRE(test_collecting_json_value("false", mode));
+  REQUIRE(test_collecting_json_value(R"("")", mode));
+  REQUIRE(test_collecting_json_value(R"("hello")", mode));
+  REQUIRE(test_collecting_json_value(R"("\"\\\/\b\f\n\r\t")", mode));
+  REQUIRE(test_collecting_json_value(R"("\u0000")", mode));
+  REQUIRE(test_collecting_json_value(R"("\u20AC")", mode));
+  REQUIRE(test_collecting_json_value(R"("\uD83D\uDE00")", mode));
+  REQUIRE(test_collecting_json_value("[1]", mode));
+  REQUIRE(test_collecting_json_value("[null,true,false,\"x\",{},[]]", mode));
+  REQUIRE(test_collecting_json_value("[[[[]]]]", mode));
+  REQUIRE(test_collecting_json_value(R"({"a":1})", mode));
+  REQUIRE(test_collecting_json_value(R"({"a":1,"b":null,"c":true,"d":[],"e":{}})", mode));
+  REQUIRE(test_collecting_json_value(R"({"":{"":{}}})", mode));
+  REQUIRE(test_collecting_json_value(R"({"a":[1,{"b":[true,null,"x"]},3],"c":{"d":[]}})", mode));
 }
 
 REGISTER_TEST_LISTENER(moko3::gtest_listener);

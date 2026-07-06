@@ -9,26 +9,11 @@
 
 namespace omo {
 
-inline std::string_view cut_json_value(std::string_view& json) {
-  boost::json::basic_parser<boostjson_noop_handler> p(/*opt=*/{});
-  boost::system::error_code ec;
-  size_t cutted;
-  try {
-    cutted = p.write_some(/*more=*/true, json.data(), json.size(), ec);
-  } catch (std::exception& e) {
-    throw parse_error("invalid json, {}", e.what());
-  }
-  if (ec)
-    throw parse_error("invalid json, {}", ec.message());
-  std::string_view json_value = json.substr(0, cutted);
-  json.remove_prefix(cutted);
-  return json_value;
-}
-
 struct stream_parser {
   boost::json::basic_parser<boostjson_token_feeder> p;
 
   // `make_parser` должно вернуть omo::tokens_consumer
+  // Note: при вызове make_parser токен ещё не имеет смысла, его нельзя пытаться интерпретировать
   explicit stream_parser(std::invocable<sax_token&, dd::with_stack_resource> auto make_parser,
                          std::span<unsigned char> buf = {})
       : p(/*options*/ {}, std::move(make_parser), buf) {
@@ -63,54 +48,70 @@ struct stream_parser {
   }
 };
 
+namespace noexport {
+
+static const sax_token& as_token_view(const sax_token& s) {
+  return s;
+}
+static sax_token as_token_view(const sax_token_value& v) {
+  return v.to_view();
+}
+
+}  // namespace noexport
+
+// возвращает итератор на первый необработанный токен
+// останавливается если 'c' больше не может принимать токены
+// pre: `tok` это тот токен с которого забирает токены 'c'
+template <std::ranges::range R>
+std::ranges::iterator_t<R> feed_tokens_to(tokens_consumer& c, sax_token& tok, R&& tokens) {
+  auto it = c.cur_iterator();
+
+  auto b = std::ranges::begin(tokens);
+  auto e = std::ranges::end(tokens);
+  for (; b != e; ++b) {
+    if (it == c.end()) [[unlikely]]  // парсер кончился раньше чем токены
+      break;
+    auto& t = *b;
+    // инвариант, что генератор никогда не увидит part
+    assert(t.kind() != sax_token::part);
+    tok = noexport::as_token_view(t);
+    ++it;
+  }
+
+  return b;
+}
+
 struct stream_parser_tokens {
  private:
   sax_token tok;
   dd::stack_resource resource;
-  tokens_consumer gen;
+  tokens_consumer consumer;
 
  public:
   // Note: каждое значение должно обрабатываться своим stream_parse_tokens
   // `make_parser` должно вернуть omo::tokens_consumer
+  // Note: при вызове make_parser токен ещё не имеет смысла, его нельзя пытаться интерпретировать
   explicit stream_parser_tokens(std::invocable<sax_token&, dd::with_stack_resource> auto make_parser,
                                 std::span<unsigned char> buf = {})
-      : resource(buf), gen(make_parser(tok, dd::with_stack_resource(resource))) {
+      : resource(buf), consumer(make_parser(tok, dd::with_stack_resource(resource))) {
   }
 
   // если одно json value распаршено и есть следующее, то парсинг прекращается
   // если после feed is_done() == true, но не все токены обработаны, это значит что оставшееся - другое json
   // значение
-  // возвращает количество обработанных токенов
+  // возвращает итератор на первый необработанный токен (или end если обработаны все)
   // pre: tokens НЕ содержит part
   template <std::ranges::range R>
-  size_t feed(R&& tokens, bool end) {
-    auto it = gen.cur_iterator();
-    constexpr bool can_distance = std::ranges::random_access_range<R>;
-    size_t handled = 0;
-    auto b = std::ranges::begin(tokens);
-    auto e = std::ranges::end(tokens);
-    for (; b != e; ++b) {
-      if (it == gen.end()) [[unlikely]]  // парсер кончился раньше чем токены
-        break;
-      auto& t = *b;
-      // инвариант, что генератор никогда не увидит part
-      assert(t.kind() != sax_token::part);
-      tok = t.to_view();
-      ++it;
-      if constexpr (!can_distance)
-        ++handled;
-    }
-    if (end && it != gen.end())  // токены кончились раньше парсера
+  std::ranges::iterator_t<R> feed(R&& tokens, bool end) {
+    auto b = feed_tokens_to(consumer, tok, std::forward<R>(tokens));
+    if (end && consumer.cur_iterator() != consumer.end())  // токены кончились раньше парсера
       throw parse_error("input is over, but parsing not ended");
-    if constexpr (can_distance)
-      return std::distance(std::ranges::begin(tokens), b);
-    else
-      return handled;
+    return b;
   }
 
   // значение было распаршено
   [[nodiscard]] bool is_done() const noexcept {
-    return gen.empty();
+    return consumer.empty();
   }
 };
 
@@ -183,6 +184,50 @@ inline tokens_consumer collect_json_value_tokens(sax_token& token, auto on_token
     return;
   };
   return sax_ignore_json_value(token, std::move(foo), r);
-};
+}
+
+// Внезапно... Собирает boost json value из токенов.
+// Важная вещь для совмещения подходов dom/sax парсинга, т.к. позволяет сделать заглушку в sax парсинге
+// переиспользуя dom парсинг
+//
+// бросает исключение только при навалидном json
+//
+// pre: токены не должны содержать part
+tokens_consumer json_value_collector(sax_token& tok, boost::json::value& out, dd::with_stack_resource r);
+
+// возвращает итератор на первый элемент представляющий следующее значение
+// выставляет found_value_end = true, если конец значения удалось найти
+//
+// pre: json подан с начала, предыдущие токены не пропущены
+template <std::ranges::range R>
+[[nodiscard]] std::ranges::iterator_t<R> cut_json_value(R&& json, bool& found_value_end) {
+  stream_parser_tokens parser([](sax_token& tok, dd::with_stack_resource r) {
+    return sax_ignore_json_value(tok, [](sax_token&) {}, r);
+  });
+
+  auto it = parser.feed(std::forward<R>(json), /*end=*/false);
+  found_value_end = parser.is_done();
+  return it;
+}
+
+// возвращает пустую строку, если `json` не содержит полного джсон значения
+// pre: json подан с начала, предыдущие данные не пропущены
+inline std::string_view cut_json_value(std::string_view& json) {
+  stream_parser parser([](sax_token& tok, dd::with_stack_resource r) {
+    return sax_ignore_json_value(tok, [](sax_token&) {}, r);
+  });
+  // end везде false, чтобы не спровоцировать ошибку, если просто не хватило джсона до полного значения
+  size_t cutted = parser.feed(json, /*end=*/false);
+  if (!parser.is_done()) {
+    // добавляем пробел, чтобы избежать неоднозначности:
+    // json = "43" может означать как просто значение 43, так и часть json "4321"
+    parser.feed(" ", /*end=*/false);
+    if (!parser.is_done())
+      return {};
+  }
+  std::string_view json_value = json.substr(0, cutted);
+  json.remove_prefix(cutted);
+  return json_value;
+}
 
 }  // namespace omo
