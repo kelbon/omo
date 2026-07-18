@@ -8,6 +8,8 @@
 
 #include <boost/system/error_code.hpp>
 
+#include <deque>
+
 namespace omo {
 
 // принимает на вход токены и функцию для создания парсера
@@ -18,15 +20,17 @@ struct token_feeder {
   dd::stack_resource resource;
   tokens_consumer gen;
   sax_token tok{};
-  // must be outside unite generator for string view
-  std::string partbuf;
+  // снаружи unite_generate чтобы можно было брать string_view
+  // deque гарантирует, что до конца парса никакое string_view на токен не провиснет
+  // в нормальной ситуации частей очень мало либо нет совсем, поэтому это дешёво
+  std::deque<std::string> parts;
   bool ended = false;
   bool part = false;
 
   tokens_consumer unite_generate(tokens_consumer old_gen, dd::with_stack_resource r) {
     tok.expect(tok.part);
     part = true;
-    partbuf.clear();
+    std::string& partbuf = parts.emplace_back();
     on_scope_failure(destroy_gen) {
       // guarantee order of deallocactions for resources, firstly this generator, then old_gen
       gen = std::move(old_gen);
