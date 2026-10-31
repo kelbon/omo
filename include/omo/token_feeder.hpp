@@ -27,30 +27,30 @@ struct token_feeder {
   bool ended = false;
   bool part = false;
 
-  tokens_consumer unite_generate(tokens_consumer old_gen, dd::with_stack_resource r) {
-    tok.expect(tok.part);
-    part = true;
-    std::string& partbuf = parts.emplace_back();
+  static tokens_consumer unite_generate(token_feeder& f, tokens_consumer old_gen, dd::with_stack_resource r) {
+    f.tok.expect(f.tok.part);
+    f.part = true;
+    std::string& partbuf = f.parts.emplace_back();
     on_scope_failure(destroy_gen) {
       // guarantee order of deallocactions for resources, firstly this generator, then old_gen
-      gen = std::move(old_gen);
+      f.gen = std::move(old_gen);
     };
     // когда подаётся последняя часть вызывается то частью чего это было - string/key
-    while (tok.kind() == tok.part) {
-      partbuf += tok.get_part();
+    while (f.tok.kind() == f.tok.part) {
+      partbuf += f.tok.get_part();
       co_yield {};
     }
     // kind == string/key
-    partbuf += tok.get_str();
+    partbuf += f.tok.get_str();
     // подменяем последнюю часть на весь токен целиком
-    tok.set_str(partbuf, tok.kind());
+    f.tok.set_str(partbuf, f.tok.kind());
     destroy_gen.no_longer_needed();
-    (void)gen.release();
-    gen = std::move(old_gen);
+    (void)f.gen.release();
+    f.gen = std::move(old_gen);
 
-    part = false;
+    f.part = false;
 
-    co_await dd::this_coro::destroy_and_transfer_control_to(gen.raw_handle().promise().current_worker);
+    co_await dd::this_coro::destroy_and_transfer_control_to(f.gen.raw_handle().promise().current_worker);
   }
 
   tokens_consumer starter(auto make_parser, dd::with_stack_resource r) {
@@ -88,7 +88,7 @@ struct token_feeder {
   void on_part(std::string_view s) {
     tok.set_part(s);
     if (!part)
-      gen = unite_generate(std::move(gen), dd::with_stack_resource(resource));
+      gen = unite_generate(*this, std::move(gen), dd::with_stack_resource(resource));
     consume();
   }
 
