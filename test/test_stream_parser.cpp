@@ -735,6 +735,30 @@ TEST("collecting json value") {
   REQUIRE(test_collecting_json_value(R"({"a":1,"b":null,"c":true,"d":[],"e":{}})", mode));
   REQUIRE(test_collecting_json_value(R"({"":{"":{}}})", mode));
   REQUIRE(test_collecting_json_value(R"({"a":[1,{"b":[true,null,"x"]},3],"c":{"d":[]}})", mode));
+  REQUIRE(test_collecting_json_value(R"({"a":1,"b":2,"a":[3]})", mode));
+}
+
+// парсер можно уничтожить посреди строки или ключа, разрезанных между кусками данных (ошибка разбора, отмена
+// запроса): части склеиваются без генераторов, порядок освобождения памяти стек-ресурса не нарушается
+TEST("destroy in the middle of a string") {
+  std::string_view json = R"({"string_field": "abcdef", "nested_objects": [{"string_field": "xyz"}]})";
+  for (size_t cut = 1; cut < json.size(); ++cut) {
+    TestObject got;
+    stream_parser p = make_parser(got);
+    for (size_t i = 0; i < cut; ++i)
+      p.feed(json.substr(i, 1), /*end=*/false);
+  }
+  // ошибка посреди строки
+  TestObject got;
+  stream_parser p = make_parser(got);
+  std::string_view broken = R"({"string_field": "ab)";
+  try {
+    for (size_t i = 0; i < broken.size(); ++i)
+      p.feed(broken.substr(i, 1), /*end=*/i + 1 == broken.size());
+    FAIL("should not be reached");
+  } catch (parse_error&) {
+    // OK
+  }
 }
 
 REGISTER_TEST_LISTENER(moko3::gtest_listener);

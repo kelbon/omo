@@ -24,14 +24,14 @@ include(${CCOZY_SOURCE_DIR}/ccozy_tools.cmake)
 CPMAddPackage(
   NAME KELCORO
   GITHUB_REPOSITORY kelbon/kelcoro
-  GIT_TAG v1.4.3
+  GIT_TAG v1.4.9
 )
 
 # move_only_function, function ref etc (anyanylib)
 CPMAddPackage(
   NAME ANYANY
   GITHUB_REPOSITORY kelbon/AnyAny
-  GIT_TAG v1.2.1
+  GIT_TAG v1.3.1
 )
 
 # on_scope_exit / on_scope_failure (zallib)
@@ -45,7 +45,7 @@ if (omo_ENABLE_TESTING)
   CPMAddPackage(
     NAME MOKO3
     GITHUB_REPOSITORY kelbon/moko3
-    GIT_TAG v0.9.4
+    GIT_TAG v0.10.3
   )
 endif()
 

@@ -15,8 +15,8 @@ static tokens_consumer json_object_collector(sax_token& tok, boost::json::object
     co_yield {};
     boost::json::value property;
     co_yield dd::elements_of(json_value_collector(tok, property, r));
-    // берём первый попавшийся, дублирующиеся ключи игнорируем
-    out.emplace(key, std::move(property));
+    // повторяющийся ключ - последний выигрывает, как в boost::json::parse
+    out.insert_or_assign(key, std::move(property));
   }
 }
 
