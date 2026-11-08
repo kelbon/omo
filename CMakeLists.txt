@@ -17,7 +17,6 @@ target_include_directories(omolib PUBLIC "${CMAKE_CURRENT_SOURCE_DIR}/include")
 
 target_link_libraries(omolib PUBLIC
     ${CMAKE_THREAD_LIBS_INIT}
-    anyanylib
     kelcorolib
     zallib
     Boost::json

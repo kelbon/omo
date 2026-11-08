@@ -27,13 +27,6 @@ CPMAddPackage(
   GIT_TAG v1.4.9
 )
 
-# move_only_function, function ref etc (anyanylib)
-CPMAddPackage(
-  NAME ANYANY
-  GITHUB_REPOSITORY kelbon/AnyAny
-  GIT_TAG v1.3.1
-)
-
 # on_scope_exit / on_scope_failure (zallib)
 CPMAddPackage(
   NAME LOGIC_GUARDS
@@ -45,7 +38,7 @@ if (omo_ENABLE_TESTING)
   CPMAddPackage(
     NAME MOKO3
     GITHUB_REPOSITORY kelbon/moko3
-    GIT_TAG v0.10.3
+    GIT_TAG v0.10.4
   )
 endif()
 
