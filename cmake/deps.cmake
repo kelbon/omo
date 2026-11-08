@@ -24,7 +24,7 @@ include(${CCOZY_SOURCE_DIR}/ccozy_tools.cmake)
 CPMAddPackage(
   NAME KELCORO
   GITHUB_REPOSITORY kelbon/kelcoro
-  GIT_TAG v1.4.9
+  GIT_TAG v1.5.0
 )
 
 # on_scope_exit / on_scope_failure (zallib)
